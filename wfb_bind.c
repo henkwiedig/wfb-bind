@@ -8,6 +8,7 @@
 #include <signal.h>
 #include <sys/wait.h>
 
+#define MAX_NIC_LENGTH 20
 #define BUFFER_SIZE 1024
 
 const unsigned char bind_gs_key[] = {
@@ -54,6 +55,79 @@ void check_and_generate_keys() {
 
 }
 
+// Function to get the first NIC from /etc/default/wifibroadcast
+int get_gs_nic_from_file(char *nic) {
+    FILE *file = fopen("/etc/default/wifibroadcast", "r");
+    if (file == NULL) {
+        perror("Failed to open file");
+        return -1;
+    }
+
+    char line[256];
+    while (fgets(line, sizeof(line), file)) {
+        if (strncmp(line, "WFB_NICS=", 9) == 0) {
+            // Find the value of WFB_NICS (after the '=' character)
+            char *nics_value = line + 9;
+            
+            // Remove the leading double quote if it exists
+            if (*nics_value == '"') {
+                nics_value++;  // Skip the leading quote
+            }
+
+            // Get the first NIC by tokenizing the string
+            char *first_nic = strtok(nics_value, " \n");
+
+            if (first_nic != NULL) {
+                // Remove the trailing double quote if it exists
+                size_t len = strlen(first_nic);
+                if (len > 0 && first_nic[len - 1] == '"') {
+                    first_nic[len - 1] = '\0';  // Null-terminate at the quote
+                }
+
+                // Copy the first NIC to the nic buffer
+                strncpy(nic, first_nic, MAX_NIC_LENGTH);
+                fclose(file);
+                return 0;  // Successfully got the first NIC
+            }
+        }
+    }
+
+    fclose(file);
+    return -1;  // No NIC found
+}
+
+
+// Function to get the wlan name from /etc/wfb.conf
+int get_drone_nic_from_file(char *wlan) {
+    FILE *file = fopen("/etc/wfb.conf", "r");
+    if (file == NULL) {
+        perror("Failed to open file");
+        return -1;
+    }
+
+    char line[256];
+    while (fgets(line, sizeof(line), file)) {
+        // Check if the line starts with "wlan="
+        if (strncmp(line, "wlan=", 5) == 0) {
+            // Extract the wlan name (after the "=" character)
+            char *wlan_value = line + 5;
+            
+            // Remove any trailing newline or extra spaces
+            char *newline_pos = strchr(wlan_value, '\n');
+            if (newline_pos) {
+                *newline_pos = '\0';  // Null-terminate at the newline
+            }
+
+            // Copy the wlan name to the buffer
+            strncpy(wlan, wlan_value, MAX_NIC_LENGTH);
+            fclose(file);
+            return 0;  // Successfully got the wlan name
+        }
+    }
+
+    fclose(file);
+    return -1;  // wlan not found
+}
 
 void create_bind_key(const char *filename, const unsigned char *data, size_t size) {
     FILE *file = fopen(filename, "wb");
@@ -107,11 +181,17 @@ void gs() {
     char bind_port_str[6];
     snprintf(bind_port_str, sizeof(bind_port_str), "%d", bind_port);  // Convert bind_port to string
 
+    char first_nic[MAX_NIC_LENGTH];
+    if (get_gs_nic_from_file(first_nic) != 0) {
+        printf("Failed to read NIC from file.\n");
+        exit(EXIT_FAILURE);
+    }
+
     const char *const subprocess_args[] = {
         "wfb_tx", "-f", "data", "-p", "255", "-u", bind_port_str, "-K", bind_key, 
         "-B", "20", "-G", "long", "-S", "1", "-L", "1", "-M", "1", "-k", "1",
         "-n", "2", "-T", "0", "-F", "0", "-i", "7669206", "-R", "2097152", 
-        "-l", "200", "-C", "0", "wlx7822881929b8", "wlx782288192cd2", NULL
+        "-l", "200", "-C", "0", first_nic, NULL
     };
 
     // Start the subprocess and get its PID
@@ -182,9 +262,17 @@ void drone() {
     char bind_port_str[6];
     snprintf(bind_port_str, sizeof(bind_port_str), "%d", bind_port);  // Convert bind_port to string
 
+    char nic[MAX_NIC_LENGTH];
+    
+    // Read wlan name from /etc/wfb.conf
+    if (get_drone_nic_from_file(nic) != 0) {
+        printf("Failed to read nic from file.\n");
+        exit(EXIT_FAILURE);
+    }    
+
     const char *const subprocess_args[] = { 
         "wfb_rx", "-p", "255", "-u", bind_port_str, "-K", bind_key, 
-        "-i", "7669206", "wlan0", NULL 
+        "-i", "7669206", nic, NULL 
     };
 
     // Start the subprocess and get its PID
@@ -216,7 +304,7 @@ void drone() {
         exit(EXIT_FAILURE);
     }
 
-    printf("UDP receiver started on port %d\n", bind_port);
+    printf("UDP receiver started on port %d and nic %s\n", bind_port,nic);
 
     // Open the output file
     file = fopen(drone_key, "wb");
